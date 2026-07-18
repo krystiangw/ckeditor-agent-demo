@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClaimDesk — Claim correspondence</title>
+  <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5/48.3.1/ckeditor5.css" />
+  <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5-premium-features/48.3.1/ckeditor5-premium-features.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="ClaimDesk home">
+      <span class="brand-mark">C</span>
+      <span>ClaimDesk</span>
+    </a>
+    <div class="topbar-context">
+      <span>Correspondence workbench</span>
+      <span class="topbar-divider"></span>
+      <span id="claim-heading">Loading case…</span>
+    </div>
+    <button id="save-button" class="button button-primary button-compact" type="button">Save letter</button>
+  </header>
+
+  <main class="app-grid">
+    <aside class="left-rail" aria-label="Case information">
+      <section class="card case-card">
+        <div class="eyebrow">Active claim</div>
+        <div class="case-title-row">
+          <h1 id="case-id">—</h1>
+          <span id="case-status" class="status-chip">Loading</span>
+        </div>
+        <dl class="case-details">
+          <div><dt>Claimant</dt><dd id="case-claimant">—</dd></div>
+          <div><dt>Policy</dt><dd id="case-policy">—</dd></div>
+          <div><dt>Coverage</dt><dd id="case-coverage">—</dd></div>
+          <div><dt>Claim amount</dt><dd id="case-amount">—</dd></div>
+          <div><dt>Adjuster</dt><dd id="case-adjuster">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="rail-section audit-section">
+        <div class="section-heading">
+          <div>
+            <div class="eyebrow">Governance</div>
+            <h2>Audit trail</h2>
+          </div>
+          <span id="audit-count" class="count-badge">0</span>
+        </div>
+        <div id="audit-list" class="audit-list">
+          <p class="muted empty-message">No activity recorded yet.</p>
+        </div>
+      </section>
+    </aside>
+
+    <section class="document-column" aria-label="Claim letter editor">
+      <div class="document-heading">
+        <div>
+          <div class="eyebrow">Customer correspondence</div>
+          <h2>Claim decision letter</h2>
+        </div>
+        <div id="save-state" class="save-state">Not saved</div>
+      </div>
+      <div class="editor-shell">
+        <div id="empty-hint" class="empty-hint">
+          <strong>No letter drafted yet</strong>
+          <span>Use “Draft response” to start from the approved template.</span>
+        </div>
+        <div class="editor-and-sidebar">
+          <div id="editor"></div>
+          <div id="annotations" class="annotations-sidebar" aria-label="Review annotations"></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="right-rail" aria-label="Agent controls">
+      <section class="card agent-card">
+        <div class="agent-heading">
+          <span class="agent-icon" aria-hidden="true">✦</span>
+          <div><div class="eyebrow">Governed assistant</div><h2>Claims agent</h2></div>
+          <span class="live-dot" title="Ready"></span>
+        </div>
+
+        <label class="field-label" for="engine-select">Engine</label>
+        <select id="engine-select">
+          <option>Deterministic rules</option>
+          <option disabled title="extension point">Claude API — extension point</option>
+        </select>
+
+        <div class="task-grid" aria-label="Agent tasks">
+          <button id="draft-button" class="task-button task-primary" type="button"><span>✎</span>Draft response</button>
+          <button id="compliance-button" class="task-button" type="button"><span>✓</span>Compliance pass</button>
+          <button id="pii-button" class="task-button" type="button"><span>▣</span>Redact PII</button>
+          <button id="plain-button" class="task-button" type="button"><span>Aa</span>Plain-language rewrite</button>
+          <button id="table-button" class="task-button" type="button"><span>▦</span>Insert settlement table</button>
+          <button id="snapshot-button" class="task-button" type="button"><span>◉</span>Snapshot for audit</button>
+        </div>
+      </section>
+
+      <section id="findings-card" class="card compact-card hidden">
+        <div class="section-heading"><h2>Review findings</h2><span id="finding-count" class="count-badge">0</span></div>
+        <ul id="findings-list" class="findings-list"></ul>
+      </section>
+
+      <section class="card compact-card">
+        <div class="section-heading"><h2>Usage</h2><span class="meter-label">Live</span></div>
+        <div class="usage-grid">
+          <div><strong id="editor-loads">1</strong><span>Editor loads</span></div>
+          <div><strong id="agent-ops">0</strong><span>Agent ops</span></div>
+          <div><strong id="suggestion-count">0</strong><span>Pending</span></div>
+        </div>
+        <div id="document-stats" class="document-stats">Stats appear after drafting.</div>
+      </section>
+
+      <section class="card compact-card activity-card">
+        <div class="section-heading"><h2>Activity</h2><button id="clear-log" class="text-button" type="button">Clear</button></div>
+        <div id="activity-log" class="activity-log" aria-live="polite">
+          <div class="log-line log-muted">Ready for an agent task.</div>
+        </div>
+      </section>
+
+      <button id="built-with-button" class="built-with" type="button">⚙ Built with CKEditor MCP</button>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <div id="lightbox" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Audit snapshot">
+    <button class="overlay-close" type="button" data-close="lightbox" aria-label="Close">×</button>
+    <img id="lightbox-image" alt="Full audit snapshot" />
+  </div>
+
+  <div id="built-with-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="built-with-title">
+    <div class="modal-panel">
+      <button class="modal-close" type="button" data-close="built-with-modal" aria-label="Close">×</button>
+      <div class="eyebrow">Integration proof</div>
+      <h2 id="built-with-title">Built with CKEditor MCP</h2>
+      <p class="muted">The integration was scaffolded and validated through the CKEditor integration MCP.</p>
+      <pre id="integration-log">Loading…</pre>
+    </div>
+  </div>
+
+  <script src="https://cdn.ckeditor.com/ckeditor5/48.3.1/ckeditor5.umd.js"></script>
+  <script src="https://cdn.ckeditor.com/ckeditor5-premium-features/48.3.1/ckeditor5-premium-features.umd.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

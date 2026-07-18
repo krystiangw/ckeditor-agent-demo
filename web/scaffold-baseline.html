@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>CKEditor 5</title>
+  <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5/48.3.1/ckeditor5.css" />
+  <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5-premium-features/48.3.1/ckeditor5-premium-features.css" />
+</head>
+<body>
+  <div id="editor"><p>Hello, CKEditor!</p></div>
+
+  <script src="https://cdn.ckeditor.com/ckeditor5/48.3.1/ckeditor5.umd.js"></script>
+  <script src="https://cdn.ckeditor.com/ckeditor5-premium-features/48.3.1/ckeditor5-premium-features.umd.js"></script>
+  <script>
+    const { ClassicEditor, Essentials, Paragraph, Bold, Italic, Heading, List, Link, Table } = CKEDITOR;
+      const { TrackChanges, Comments, FormatPainter } = CKEDITOR_PREMIUM_FEATURES;
+
+    ClassicEditor.create(document.querySelector('#editor'), {
+      licenseKey: '<license-key>',
+      plugins: [ Essentials, Paragraph, Bold, Italic, Heading, List, Link, Table, TrackChanges, Comments, FormatPainter ],
+      toolbar: [ 'undo', 'redo', '|', 'bold', 'italic', 'heading', 'bulletedList', 'link', 'insertTable', 'trackChanges', 'comment', 'formatPainter' ]
+    }).then((editor) => {
+      window.editor = editor;
+    }).catch(console.error);
+  </script>
+</body>
+</html>

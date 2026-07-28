@@ -1,4 +1,5 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = resolve(root, 'data');
 const documentFile = resolve(dataDir, 'document.json');
 const auditFile = resolve(dataDir, 'audit.json');
+const externalPlanFile = resolve(dataDir, 'external-plan.json');
 
 async function loadEnv() {
   try {
@@ -122,6 +124,134 @@ app.post('/api/audit', async (req, res) => {
     entries.unshift(entry);
     await writeJson(auditFile, entries);
     res.status(201).json(entry);
+  } catch (error) {
+    res.status(500).json({ error: messageOf(error) });
+  }
+});
+
+function validatePlanStep(step) {
+  if (!step || typeof step !== 'object') return 'each plan step must be an object';
+  if (step.kind === 'replace') {
+    if (typeof step.find !== 'string' || !step.find) return 'replace step requires a non-empty find string';
+    if (typeof step.replacement !== 'string') return 'replace step requires a replacement string';
+    return null;
+  }
+  if (step.kind === 'insertParagraphBefore') {
+    if (typeof step.anchor !== 'string' || !step.anchor) return 'insertParagraphBefore step requires a non-empty anchor';
+    if (typeof step.html !== 'string' || !step.html) return 'insertParagraphBefore step requires html';
+    return null;
+  }
+  return `unknown step kind: ${String(step.kind)}`;
+}
+
+// External agents (e.g. an MCP-driven CLI agent) submit proposed changes here
+// instead of overwriting the document — the browser applies them as Track
+// Changes suggestions so a human accepts or rejects each one.
+// All plan reads/writes go through one promise chain: the check-then-write
+// pairs below must not interleave across concurrent requests.
+let planLock = Promise.resolve();
+function withPlanLock(fn) {
+  const run = planLock.then(fn, fn);
+  planLock = run.catch(() => {});
+  return run;
+}
+
+// A claimed plan whose consumer died (closed tab, lost response) becomes
+// claimable again once its lease expires, so proposals are never lost.
+const CLAIM_LEASE_MS = 30_000;
+function leaseExpired(entry) {
+  return Date.now() - Date.parse(entry.claimedAt || 0) > CLAIM_LEASE_MS;
+}
+function isClaimable(entry) {
+  if (!entry) return false;
+  if (entry.status === 'pending') return true;
+  return entry.status === 'claimed' && leaseExpired(entry);
+}
+
+app.post('/api/agent/external-plan', async (req, res) => {
+  try {
+    const { plan, summary, actor } = req.body || {};
+    if (!Array.isArray(plan) || plan.length === 0) {
+      return res.status(400).json({ error: 'plan must be a non-empty array' });
+    }
+    for (const step of plan) {
+      const problem = validatePlanStep(step);
+      if (problem) return res.status(400).json({ error: problem });
+    }
+    await withPlanLock(async () => {
+      const pending = await readJson(externalPlanFile, null);
+      const busy = pending
+        && (pending.status === 'pending' || (pending.status === 'claimed' && !leaseExpired(pending)));
+      if (busy) {
+        res.status(409).json({ error: 'a pending plan already exists — wait until it is consumed' });
+        return;
+      }
+      const entry = {
+        id: randomUUID(),
+        actor: typeof actor === 'string' && actor ? actor : 'External agent',
+        summary: typeof summary === 'string' ? summary : '',
+        plan,
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+      };
+      await writeJson(externalPlanFile, entry);
+      res.status(201).json(entry);
+    });
+  } catch (error) {
+    res.status(500).json({ error: messageOf(error) });
+  }
+});
+
+app.get('/api/agent/external-plan', async (_req, res) => {
+  try {
+    const entry = await readJson(externalPlanFile, null);
+    res.json(isClaimable(entry) ? entry : null);
+  } catch (error) {
+    res.status(500).json({ error: messageOf(error) });
+  }
+});
+
+// Exclusive, leased claim: exactly one consumer wins; if it dies before the
+// final ack, the lease expires and the plan becomes claimable again.
+app.post('/api/agent/external-plan/:id/claim', async (req, res) => {
+  try {
+    await withPlanLock(async () => {
+      const entry = await readJson(externalPlanFile, null);
+      if (!entry || entry.id !== req.params.id) {
+        res.status(404).json({ error: 'plan not found' });
+        return;
+      }
+      if (!isClaimable(entry)) {
+        res.status(409).json({ error: `plan not claimable (status: ${entry.status})` });
+        return;
+      }
+      entry.status = 'claimed';
+      entry.claimedAt = new Date().toISOString();
+      await writeJson(externalPlanFile, entry);
+      res.json(entry);
+    });
+  } catch (error) {
+    res.status(500).json({ error: messageOf(error) });
+  }
+});
+
+app.post('/api/agent/external-plan/:id/ack', async (req, res) => {
+  try {
+    await withPlanLock(async () => {
+      const entry = await readJson(externalPlanFile, null);
+      if (!entry || entry.id !== req.params.id) {
+        res.status(404).json({ error: 'plan not found' });
+        return;
+      }
+      if (entry.status !== 'claimed') {
+        res.status(409).json({ error: `plan is ${entry.status}, expected claimed` });
+        return;
+      }
+      entry.status = 'consumed';
+      entry.consumedAt = new Date().toISOString();
+      await writeJson(externalPlanFile, entry);
+      res.json(entry);
+    });
   } catch (error) {
     res.status(500).json({ error: messageOf(error) });
   }

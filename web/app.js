@@ -78,7 +78,9 @@
 
   async function request(path, options = {}) {
     const method = options.method || 'GET';
-    const isAgentCall = path.startsWith('/api/agent/');
+    // `silent` skips the agent-ops meter and activity log — used by the 2 s
+    // polling reads, which are bookkeeping, not agent work.
+    const isAgentCall = path.startsWith('/api/agent/') && !options.silent;
     if (isAgentCall) {
       state.agentOps += 1;
       renderMeter();
@@ -104,7 +106,7 @@
   }
 
   function formatMoney(amount) {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+    return new Intl.NumberFormat('pl-PL', { style: 'currency', currency: 'PLN' }).format(amount);
   }
 
   function renderCase(caseData) {
@@ -167,10 +169,10 @@
     }
   }
 
-  async function addAudit(action, thumb) {
+  async function addAudit(action, thumb, actor = 'Claims Agent (AI)') {
     const entry = await request('/api/audit', {
       method: 'POST',
-      body: JSON.stringify({ actor: 'Claims Agent (AI)', action, ...(thumb ? { thumb } : {}) }),
+      body: JSON.stringify({ actor, action, ...(thumb ? { thumb } : {}) }),
     });
     state.audit.unshift(entry);
     renderAudit();
@@ -218,6 +220,30 @@
 
   function blockText(element) {
     return Array.from(element.getChildren()).map((node) => node.data || '').join('');
+  }
+
+  function plainDocText() {
+    const div = document.createElement('div');
+    div.innerHTML = state.editor.getData();
+    return div.textContent || '';
+  }
+
+  // Validate a plan against the CURRENT document before any mutation, so a
+  // stale plan is rejected whole instead of half-applied or applied as no-ops.
+  function planProblem(plan) {
+    const text = plainDocText().toLowerCase();
+    for (const step of plan) {
+      if (step.kind === 'replace') {
+        if (!text.includes(step.find.toLowerCase())) return `find text not present: "${step.find}"`;
+      } else if (step.kind === 'insertParagraphBefore') {
+        const root = state.editor.model.document.getRoot();
+        const found = Array.from(root.getChildren()).some((child) => blockText(child).trim().startsWith(step.anchor));
+        if (!found) return `anchor not found: "${step.anchor}"`;
+      } else {
+        return `unknown step kind: ${String(step.kind)}`;
+      }
+    }
+    return null;
   }
 
   async function applyPlan(plan) {
@@ -346,6 +372,8 @@
       method: 'PUT',
       body: JSON.stringify({ html: state.editor.getData() }),
     });
+    state.lastSavedAt = saved.savedAt;
+    state.localDirty = false;
     $('#save-state').textContent = `Saved ${formatTime(saved.savedAt)}`;
     toast('Letter saved.');
   }
@@ -428,10 +456,119 @@
       $('#empty-hint').classList.add('hidden');
       $('#save-state').textContent = documentData.savedAt ? `Saved ${formatTime(documentData.savedAt)}` : 'Loaded';
     }
-    state.editor.model.document.on('change:data', scheduleSuggestionRefresh);
+    state.editor.model.document.on('change:data', () => {
+      scheduleSuggestionRefresh();
+      // Any change not coming from the remote-sync path marks local work in
+      // progress, so polling will not overwrite it with remote content.
+      if (!state.applyingRemote) state.localDirty = true;
+    });
     wireEvents();
     refreshSuggestions(0);
     log('Editor ready.', 'muted');
+
+    // Live sync: an external agent may update the document/audit through the
+    // REST API — poll so its changes appear without a manual refresh.
+    state.lastSavedAt = documentData.savedAt || null;
+    setInterval(async () => {
+      try {
+        const [doc, audit] = await Promise.all([
+          request('/api/document'),
+          request('/api/audit'),
+        ]);
+        // Defer remote content while local work is in flight (unsaved edits
+        // or unresolved suggestions) — the unchanged watermark retries later.
+        const dirty = state.suggestionsPending > 0
+          || state.localDirty
+          || $('#save-state').textContent === 'Unsaved changes';
+        // Strictly-newer comparison: a GET that started before a local save
+        // and resolved after it carries an OLDER document — discard it.
+        const incomingAt = doc.savedAt ? Date.parse(doc.savedAt) : 0;
+        const knownAt = state.lastSavedAt ? Date.parse(state.lastSavedAt) : 0;
+        if (incomingAt > knownAt && !dirty) {
+          state.lastSavedAt = doc.savedAt;
+          if (doc.html !== state.editor.getData()) {
+            state.applyingRemote = true;
+            try {
+              state.editor.setData(doc.html);
+            } finally {
+              state.applyingRemote = false;
+            }
+            $('#empty-hint').classList.toggle('hidden', Boolean(doc.html));
+            $('#save-state').textContent = `Updated by agent ${formatTime(doc.savedAt)}`;
+            log('Document updated by external agent.', 'muted');
+          }
+        }
+        if (audit.length !== state.audit.length) {
+          state.audit = audit;
+          renderAudit();
+        }
+        // External agents propose changes as a plan — apply it here as Track
+        // Changes suggestions so the human accepts/rejects each one.
+        if (!state.busy && !state.planSyncBusy) {
+          state.planSyncBusy = true;
+          try {
+            const pending = await request('/api/agent/external-plan', { silent: true });
+            if (pending) {
+              setBusy(true);
+              try {
+                // Claim exclusively BEFORE touching the editor — one consumer
+                // wins the lease, a concurrent tab gets 409 and backs off; if
+                // this tab dies mid-work, the lease expires and the plan is
+                // claimable again (never silently lost).
+                let claimed = false;
+                try {
+                  await request(`/api/agent/external-plan/${pending.id}/claim`, { method: 'POST', body: '{}', silent: true });
+                  claimed = true;
+                } catch {
+                  claimed = false;
+                }
+                if (claimed) {
+                  // Whatever the outcome, finish with the final ack so the
+                  // plan is consumed loudly instead of re-leasing forever.
+                  const consume = () => request(`/api/agent/external-plan/${pending.id}/ack`, { method: 'POST', body: '{}', silent: true }).catch(() => {});
+                  const problem = planProblem(pending.plan);
+                  if (problem) {
+                    await consume();
+                    await addAudit(`FAILED to apply external plan: ${problem}`, null, pending.actor).catch(() => {});
+                    log(`× External plan rejected: ${problem}`, 'error');
+                    toast(`External plan rejected: ${problem}`, true);
+                  } else {
+                    let applied = false;
+                    try {
+                      await applyPlan(pending.plan);
+                      applied = true;
+                    } catch (error) {
+                      await consume();
+                      await addAudit(`FAILED to apply external plan: ${error.message}`, null, pending.actor).catch(() => {});
+                      log(`× External plan failed: ${error.message}`, 'error');
+                      toast(`External plan failed: ${error.message}`, true);
+                    }
+                    if (applied) {
+                      await consume();
+                      // Post-application bookkeeping — its errors must not be
+                      // reported as a failed plan (suggestions are in place).
+                      renderFindings(pending.plan);
+                      $('#save-state').textContent = 'Unsaved changes';
+                      log(`External agent proposed ${pending.plan.length} changes — review the suggestions.`, 'muted');
+                      toast(`${pending.plan.length} suggestions from an external agent.`);
+                      const label = pending.summary ? ` — ${pending.summary}` : '';
+                      await addAudit(`Proposed ${pending.plan.length} changes${label}`, null, pending.actor)
+                        .catch((error) => log(`× Audit entry failed: ${error.message}`, 'error'));
+                    }
+                  }
+                }
+              } finally {
+                setBusy(false);
+              }
+            }
+          } finally {
+            state.planSyncBusy = false;
+          }
+        }
+      } catch {
+        // Transient polling errors are fine — next tick retries.
+      }
+    }, 2000);
   } catch (error) {
     console.error(error);
     log(`× Boot failed: ${error.message}`, 'error');

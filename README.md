@@ -47,6 +47,35 @@ Design decisions worth noting:
 - **Usage meter** (editor loads / agent ops / pending suggestions) mirrors CKEditor's
   own usage-based pricing model.
 
+## External agents — server workflows with governance
+
+ClaimDesk also accepts work from **agents living outside the app** (e.g. a CLI agent
+driving `ckeditor-mcp` from a terminal) — the pattern customers increasingly ask for:
+agents modifying content in server-side workflows, while the application stays the
+place where humans govern the result.
+
+Two integration surfaces:
+
+- `PUT /api/document` — publish a **new** document (first draft). The UI picks it up
+  live (2 s polling) and shows *"Updated by agent"*.
+- `POST /api/agent/external-plan` — propose **changes to an existing document** as a
+  plan of steps (`replace` / `insertParagraphBefore`, each with a `ruleId` and
+  `reason`). The browser applies the plan as **Track Changes suggestions**, so every
+  externally-proposed edit still ends with an explicit human accept/reject. Plans are
+  claimed with an exclusive 30 s lease (one consumer wins, a dead tab never strands a
+  plan), validated against the current document before any mutation, and every
+  outcome — applied, rejected, failed — lands in the audit trail with the external
+  agent's identity.
+
+```
+external agent (LLM, CLI)          ClaimDesk backend            browser editor
+  own headless CKEditor  ──plan──▶  leased plan queue  ──2 s──▶  Track Changes
+  via ckeditor-mcp                  (validate + audit)           human accepts/rejects
+```
+
+This is the "governed AI editing" narrative extended beyond the app's built-in
+assistant to *any* agent — same audit trail, same human sign-off.
+
 ## Run it
 
 ```bash
